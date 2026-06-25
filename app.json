@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "FreshKeep",
+    "slug": "freshkeep",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#F7FAF3"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.freshkeep.app"
+    },
+    "android": {
+      "package": "com.freshkeep.app"
+    },
+    "plugins": [
+      "expo-image-picker",
+      "expo-asset"
+    ]
+  }
+}
