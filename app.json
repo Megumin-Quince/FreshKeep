@@ -17,7 +17,8 @@
     },
     "plugins": [
       "expo-image-picker",
-      "expo-asset"
+      "expo-asset",
+      "expo-font"
     ]
   }
 }

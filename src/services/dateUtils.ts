@@ -2,6 +2,15 @@ import { FreshnessStatus } from "../types/inventory";
 
 const dayMs = 24 * 60 * 60 * 1000;
 
+function startOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function parseISODateAsLocal(dateText: string): Date {
+  const [year, month, day] = dateText.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
 export function addDays(date: Date, days: number): Date {
   const result = new Date(date);
   result.setDate(result.getDate() + days);
@@ -9,13 +18,16 @@ export function addDays(date: Date, days: number): Date {
 }
 
 export function toISODate(date: Date): string {
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 export function daysUntil(dateText: string): number {
-  const today = new Date();
-  const target = new Date(`${dateText}T23:59:59`);
-  return Math.ceil((target.getTime() - today.getTime()) / dayMs);
+  const today = startOfLocalDay(new Date());
+  const target = parseISODateAsLocal(dateText);
+  return Math.round((target.getTime() - today.getTime()) / dayMs);
 }
 
 export function freshnessStatus(expiresAt: string): FreshnessStatus {

@@ -17,25 +17,43 @@ import {
   TextInput,
   View
 } from "react-native";
-import { categoryLabels, categoryShelfLife, fridgeZones } from "./src/data/fridge";
+import { defaultFoodCategories, defaultFridgeZones, legacyCategoryMap, legacyZoneMap } from "./src/data/fridge";
 import { addDays, formatRemaining, freshnessStatus, toISODate } from "./src/services/dateUtils";
-import { localInventoryRepository, pendingRemoteInventoryGateway } from "./src/services/localRepository";
+import {
+  localInventoryRepository,
+  localCategoryRepository,
+  localZoneRepository,
+  pendingRemoteInventoryGateway
+} from "./src/services/localRepository";
 import { mockRecognitionService } from "./src/services/recognitionService";
 import { colors } from "./src/theme/colors";
-import { FoodCategory, FridgeZoneId, InventoryItem, ItemDraft } from "./src/types/inventory";
+import {
+  FoodCategory,
+  FoodCategoryConfig,
+  FoodCategoryDraft,
+  FridgeZone,
+  FridgeZoneDraft,
+  FridgeZoneId,
+  InventoryItem,
+  ItemDraft
+} from "./src/types/inventory";
 
-const categories = Object.keys(categoryLabels) as FoodCategory[];
-const firstZone = fridgeZones[1];
+const firstDefaultZone = defaultFridgeZones[0];
+const firstDefaultCategory = defaultFoodCategories[0];
+const initialZoneDraft: FridgeZoneDraft = { name: "", temperature: "", hint: "" };
+const initialCategoryDraft: FoodCategoryDraft = { name: "", defaultShelfLifeDays: 5 };
 
-const initialDraft: ItemDraft = {
-  name: "",
-  category: "vegetable",
-  quantity: "1 份",
-  zoneId: firstZone.id,
-  temperature: firstZone.temperature,
-  shelfLifeDays: categoryShelfLife.vegetable,
-  notes: ""
-};
+function createDraft(zone: FridgeZone = firstDefaultZone, category: FoodCategoryConfig = firstDefaultCategory): ItemDraft {
+  return {
+    name: "",
+    category: category.id,
+    quantity: "1 份",
+    zoneId: zone.id,
+    temperature: zone.temperature,
+    shelfLifeDays: category.defaultShelfLifeDays,
+    notes: ""
+  };
+}
 
 const seedItems: InventoryItem[] = [
   {
@@ -43,8 +61,8 @@ const seedItems: InventoryItem[] = [
     name: "低温鲜奶",
     category: "dairy",
     quantity: "1 瓶",
-    zoneId: "middle",
-    temperature: "2-4°C",
+    zoneId: "chill",
+    temperature: "2-6°C",
     storedAt: toISODate(addDays(new Date(), -2)),
     expiresAt: toISODate(addDays(new Date(), 4)),
     notes: "开封后优先饮用",
@@ -55,8 +73,8 @@ const seedItems: InventoryItem[] = [
     name: "菠菜",
     category: "vegetable",
     quantity: "1 把",
-    zoneId: "upper",
-    temperature: "3-5°C",
+    zoneId: "crisper",
+    temperature: "0-4°C",
     storedAt: toISODate(addDays(new Date(), -3)),
     expiresAt: toISODate(addDays(new Date(), 1)),
     notes: "已清洗，注意控水",
@@ -78,31 +96,82 @@ const seedItems: InventoryItem[] = [
 
 export default function App() {
   const [items, setItems] = useState<InventoryItem[]>([]);
+  const [zones, setZones] = useState<FridgeZone[]>(defaultFridgeZones);
+  const [foodCategories, setFoodCategories] = useState<FoodCategoryConfig[]>(defaultFoodCategories);
   const [selectedZone, setSelectedZone] = useState<FridgeZoneId | "all">("all");
-  const [draft, setDraft] = useState<ItemDraft>(initialDraft);
+  const [draft, setDraft] = useState<ItemDraft>(createDraft(defaultFridgeZones[0]));
+  const [zoneDraft, setZoneDraft] = useState<FridgeZoneDraft>(initialZoneDraft);
+  const [categoryDraft, setCategoryDraft] = useState<FoodCategoryDraft>(initialCategoryDraft);
   const [modalVisible, setModalVisible] = useState(false);
+  const [settingsModalVisible, setSettingsModalVisible] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"zones" | "categories">("zones");
   const [loading, setLoading] = useState(true);
   const [recognizing, setRecognizing] = useState(false);
 
   useEffect(() => {
-    localInventoryRepository.list().then((storedItems) => {
-      setItems(storedItems.length ? storedItems : seedItems);
-      setLoading(false);
-    });
+    Promise.all([localInventoryRepository.list(), localZoneRepository.list(), localCategoryRepository.list()])
+      .then(([storedItems, storedZones, storedCategories]) => {
+        const activeZones = storedZones.length ? storedZones : defaultFridgeZones;
+        const activeCategories = storedCategories.length ? storedCategories : defaultFoodCategories;
+        const activeZoneIds = new Set(activeZones.map((zone) => zone.id));
+        const activeCategoryIds = new Set(activeCategories.map((category) => category.id));
+        const migratedItems = (storedItems.length ? storedItems : seedItems).map((item) => {
+          const nextZoneId = legacyZoneMap[item.zoneId] ?? item.zoneId;
+          const nextCategoryId = legacyCategoryMap[item.category] ?? item.category;
+          const zone = activeZoneIds.has(nextZoneId)
+            ? activeZones.find((entry) => entry.id === nextZoneId) ?? activeZones[0]
+            : activeZones[0];
+          const category = activeCategoryIds.has(nextCategoryId) ? nextCategoryId : activeCategories[0].id;
+          return { ...item, zoneId: zone.id, temperature: zone.temperature, category };
+        });
+
+        setZones(activeZones);
+        setFoodCategories(activeCategories);
+        setItems(migratedItems);
+        setDraft(createDraft(activeZones[0], activeCategories[0]));
+      })
+      .catch(() => {
+        setZones(defaultFridgeZones);
+        setFoodCategories(defaultFoodCategories);
+        setItems(seedItems);
+        setDraft(createDraft(defaultFridgeZones[0], defaultFoodCategories[0]));
+        Alert.alert("读取本地数据失败", "FreshKeep 已使用默认配置启动，你仍然可以继续添加和保存食材。");
+      })
+      .finally(() => {
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
     if (!loading) {
-      localInventoryRepository.save(items);
+      localInventoryRepository.save(items).catch(() => {
+        console.warn("FreshKeep failed to persist inventory items.");
+      });
     }
   }, [items, loading]);
+
+  useEffect(() => {
+    if (!loading) {
+      localZoneRepository.save(zones).catch(() => {
+        console.warn("FreshKeep failed to persist fridge zones.");
+      });
+    }
+  }, [zones, loading]);
+
+  useEffect(() => {
+    if (!loading) {
+      localCategoryRepository.save(foodCategories).catch(() => {
+        console.warn("FreshKeep failed to persist food categories.");
+      });
+    }
+  }, [foodCategories, loading]);
 
   const stats = useMemo(() => {
     const expiring = items.filter((item) => freshnessStatus(item.expiresAt) === "soon").length;
     const expired = items.filter((item) => freshnessStatus(item.expiresAt) === "expired").length;
-    const zoneCount = new Set(items.map((item) => item.zoneId)).size;
+    const zoneCount = zones.length;
     return { total: items.length, expiring, expired, zoneCount };
-  }, [items]);
+  }, [items, zones.length]);
 
   const filteredItems = useMemo(() => {
     const list = selectedZone === "all" ? items : items.filter((item) => item.zoneId === selectedZone);
@@ -114,49 +183,196 @@ export default function App() {
   }
 
   function selectCategory(category: FoodCategory) {
-    updateDraft({ category, shelfLifeDays: categoryShelfLife[category] });
+    const selected = foodCategories.find((item) => item.id === category) ?? foodCategories[0] ?? firstDefaultCategory;
+    updateDraft({ category, shelfLifeDays: selected.defaultShelfLifeDays });
   }
 
   function selectZone(zoneId: FridgeZoneId) {
-    const zone = fridgeZones.find((item) => item.id === zoneId) ?? firstZone;
+    const zone = zones.find((item) => item.id === zoneId) ?? zones[0] ?? firstDefaultZone;
     updateDraft({ zoneId, temperature: zone.temperature });
   }
 
-  async function pickAndRecognize() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert("需要相册权限", "允许访问相册后，FreshKeep 才能读取图片并进行本地模拟识别。");
-      return;
-    }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.8
-    });
-
-    if (result.canceled || !result.assets[0]) {
-      return;
-    }
-
-    setRecognizing(true);
-    const asset = result.assets[0];
-    const recognition = await mockRecognitionService.recognize({
-      uri: asset.uri,
-      fileName: asset.fileName ?? undefined
-    });
-    const zone = fridgeZones.find((item) => item.id === recognition.suggestedZoneId) ?? firstZone;
-    setDraft({
-      name: recognition.name,
-      category: recognition.category,
-      quantity: "1 份",
-      zoneId: recognition.suggestedZoneId,
-      temperature: zone.temperature,
-      shelfLifeDays: recognition.shelfLifeDays,
-      notes: `${recognition.notes}，置信度 ${Math.round(recognition.confidence * 100)}%`,
-      imageUri: asset.uri
-    });
+  function openAddItemModal() {
+    setDraft(createDraft(zones[0] ?? firstDefaultZone, foodCategories[0] ?? firstDefaultCategory));
     setModalVisible(true);
-    setRecognizing(false);
+  }
+
+  function editZone(zone: FridgeZone) {
+    setZoneDraft(zone);
+    setSettingsTab("zones");
+    setSettingsModalVisible(true);
+  }
+
+  function resetSettingsDrafts() {
+    setZoneDraft(initialZoneDraft);
+    setCategoryDraft(initialCategoryDraft);
+  }
+
+  function saveZoneDraft() {
+    const name = zoneDraft.name.trim();
+    const temperature = zoneDraft.temperature.trim();
+    if (!name || !temperature) {
+      Alert.alert("还缺少分区信息", "请填写分区名称和温度范围。");
+      return;
+    }
+
+    const nextZone: FridgeZone = {
+      id: zoneDraft.id ?? `zone-${Date.now()}`,
+      name,
+      temperature,
+      hint: zoneDraft.hint.trim()
+    };
+
+    setZones((current) => {
+      const exists = current.some((zone) => zone.id === nextZone.id);
+      return exists ? current.map((zone) => (zone.id === nextZone.id ? nextZone : zone)) : [...current, nextZone];
+    });
+
+    setItems((current) =>
+      current.map((item) =>
+        item.zoneId === nextZone.id ? { ...item, temperature: nextZone.temperature } : item
+      )
+    );
+    setZoneDraft(initialZoneDraft);
+  }
+
+  function openSettings(tab: "zones" | "categories" = "zones") {
+    resetSettingsDrafts();
+    setSettingsTab(tab);
+    setSettingsModalVisible(true);
+  }
+
+  function closeSettings() {
+    resetSettingsDrafts();
+    setSettingsModalVisible(false);
+  }
+
+  function editCategory(category: FoodCategoryConfig) {
+    setCategoryDraft(category);
+    setSettingsTab("categories");
+    setSettingsModalVisible(true);
+  }
+
+  function saveCategoryDraft() {
+    const name = categoryDraft.name.trim();
+    if (!name) {
+      Alert.alert("还缺少类别名称", "请填写类别名称。");
+      return;
+    }
+
+    const nextCategory: FoodCategoryConfig = {
+      id: categoryDraft.id ?? `category-${Date.now()}`,
+      name,
+      defaultShelfLifeDays: Math.max(0, categoryDraft.defaultShelfLifeDays)
+    };
+
+    setFoodCategories((current) => {
+      const exists = current.some((category) => category.id === nextCategory.id);
+      return exists
+        ? current.map((category) => (category.id === nextCategory.id ? nextCategory : category))
+        : [...current, nextCategory];
+    });
+    setCategoryDraft(initialCategoryDraft);
+  }
+
+  function deleteCategory(categoryId: FoodCategory) {
+    if (foodCategories.length <= 1) {
+      Alert.alert("至少保留一个类别", "食材需要至少一个可选择的类别。");
+      return;
+    }
+
+    const category = foodCategories.find((entry) => entry.id === categoryId);
+    const fallback = foodCategories.find((entry) => entry.id !== categoryId) ?? firstDefaultCategory;
+    Alert.alert("删除类别", `删除“${category?.name ?? "该类别"}”后，已有食材会移动到“${fallback.name}”。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "删除",
+        style: "destructive",
+        onPress: () => {
+          setFoodCategories((current) => current.filter((entry) => entry.id !== categoryId));
+          setItems((current) =>
+            current.map((item) => (item.category === categoryId ? { ...item, category: fallback.id } : item))
+          );
+          if (draft.category === categoryId) {
+            setDraft((current) => ({ ...current, category: fallback.id, shelfLifeDays: fallback.defaultShelfLifeDays }));
+          }
+        }
+      }
+    ]);
+  }
+
+  function deleteZone(zoneId: FridgeZoneId) {
+    if (zones.length <= 1) {
+      Alert.alert("至少保留一个分区", "冰箱需要至少一个可选择的位置。");
+      return;
+    }
+
+    const zone = zones.find((entry) => entry.id === zoneId);
+    const fallback = zones.find((entry) => entry.id !== zoneId) ?? firstDefaultZone;
+    Alert.alert("删除分区", `删除“${zone?.name ?? "该分区"}”后，里面的食材会移动到“${fallback.name}”。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "删除",
+        style: "destructive",
+        onPress: () => {
+          setZones((current) => current.filter((entry) => entry.id !== zoneId));
+          setItems((current) =>
+            current.map((item) =>
+              item.zoneId === zoneId
+                ? { ...item, zoneId: fallback.id, temperature: fallback.temperature }
+                : item
+            )
+          );
+          if (selectedZone === zoneId) {
+            setSelectedZone("all");
+          }
+        }
+      }
+    ]);
+  }
+
+  async function pickAndRecognize() {
+    setRecognizing(true);
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert("需要相册权限", "允许访问相册后，FreshKeep 才能读取图片并进行本地模拟识别。");
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.8
+      });
+
+      if (result.canceled || !result.assets[0]) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      const recognition = await mockRecognitionService.recognize({
+        uri: asset.uri,
+        fileName: asset.fileName ?? undefined
+      });
+      const zone = zones.find((item) => item.id === recognition.suggestedZoneId) ?? zones[0] ?? firstDefaultZone;
+      const recognizedCategory =
+        foodCategories.find((item) => item.id === recognition.category) ?? foodCategories[0] ?? firstDefaultCategory;
+      setDraft({
+        name: recognition.name,
+        category: recognizedCategory.id,
+        quantity: "1 份",
+        zoneId: zone.id,
+        temperature: zone.temperature,
+        shelfLifeDays: recognition.shelfLifeDays || recognizedCategory.defaultShelfLifeDays,
+        notes: `${recognition.notes}，置信度 ${Math.round(recognition.confidence * 100)}%`,
+        imageUri: asset.uri
+      });
+      setModalVisible(true);
+    } catch {
+      Alert.alert("识别失败", "暂时无法读取图片，你可以改用手动放入。");
+    } finally {
+      setRecognizing(false);
+    }
   }
 
   async function saveDraft() {
@@ -182,8 +398,10 @@ export default function App() {
 
     const nextItems = [item, ...items];
     setItems(nextItems);
-    await pendingRemoteInventoryGateway.sync(nextItems);
-    setDraft(initialDraft);
+    pendingRemoteInventoryGateway.sync(nextItems).catch(() => {
+      console.warn("FreshKeep remote sync placeholder failed.");
+    });
+    setDraft(createDraft(zones[0] ?? firstDefaultZone, foodCategories[0] ?? firstDefaultCategory));
     setModalVisible(false);
   }
 
@@ -204,8 +422,11 @@ export default function App() {
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
         <LinearGradient colors={["#EAF6DF", "#F7FAF3"]} style={styles.hero}>
           <View style={styles.titleRow}>
-            <View>
-              <Text style={styles.eyebrow}>FreshKeep</Text>
+            <View style={styles.brandBlock}>
+              <Pressable style={styles.brandConfigButton} onPress={() => openSettings("zones")}>
+                <Ionicons name="settings-outline" size={15} color={colors.green} />
+                <Text style={styles.eyebrow}>FreshKeep</Text>
+              </Pressable>
               <Text style={styles.title}>冰箱食材管家</Text>
             </View>
             <View style={styles.logoMark}>
@@ -214,7 +435,7 @@ export default function App() {
           </View>
           <Text style={styles.subtitle}>记录位置、温度和保鲜期，优先处理临期食材。</Text>
           <View style={styles.actionRow}>
-            <Pressable style={styles.primaryButton} onPress={() => setModalVisible(true)}>
+            <Pressable style={styles.primaryButton} onPress={openAddItemModal}>
               <Ionicons name="add" size={20} color="#FFFFFF" />
               <Text style={styles.primaryButtonText}>手动放入</Text>
             </Pressable>
@@ -243,7 +464,7 @@ export default function App() {
             temperature={`${items.length} 件`}
             onPress={() => setSelectedZone("all")}
           />
-          {fridgeZones.map((zone) => (
+          {zones.map((zone) => (
             <ZoneChip
               key={zone.id}
               active={selectedZone === zone.id}
@@ -260,7 +481,13 @@ export default function App() {
         </View>
         <View style={styles.list}>
           {filteredItems.map((item) => (
-            <InventoryCard key={item.id} item={item} onDelete={() => deleteItem(item.id)} />
+            <InventoryCard
+              key={item.id}
+              item={item}
+              zones={zones}
+              categories={foodCategories}
+              onDelete={() => deleteItem(item.id)}
+            />
           ))}
           {!filteredItems.length && (
             <View style={styles.emptyState}>
@@ -306,14 +533,14 @@ export default function App() {
               </Field>
               <Field label="类别">
                 <View style={styles.optionWrap}>
-                  {categories.map((category) => (
+                  {foodCategories.map((category) => (
                     <Pressable
-                      key={category}
-                      style={[styles.optionPill, draft.category === category && styles.optionPillActive]}
-                      onPress={() => selectCategory(category)}
+                      key={category.id}
+                      style={[styles.optionPill, draft.category === category.id && styles.optionPillActive]}
+                      onPress={() => selectCategory(category.id)}
                     >
-                      <Text style={[styles.optionText, draft.category === category && styles.optionTextActive]}>
-                        {categoryLabels[category]}
+                      <Text style={[styles.optionText, draft.category === category.id && styles.optionTextActive]}>
+                        {category.name}
                       </Text>
                     </Pressable>
                   ))}
@@ -321,7 +548,7 @@ export default function App() {
               </Field>
               <Field label="位置与温度">
                 <View style={styles.optionWrap}>
-                  {fridgeZones.map((zone) => (
+                  {zones.map((zone) => (
                     <Pressable
                       key={zone.id}
                       style={[styles.zoneOption, draft.zoneId === zone.id && styles.zoneOptionActive]}
@@ -332,13 +559,6 @@ export default function App() {
                     </Pressable>
                   ))}
                 </View>
-                <TextInput
-                  value={draft.temperature}
-                  onChangeText={(temperature) => updateDraft({ temperature })}
-                  placeholder="当前温度"
-                  placeholderTextColor={colors.muted}
-                  style={[styles.input, styles.compactInput]}
-                />
               </Field>
               <Field label="保鲜天数">
                 <View style={styles.stepper}>
@@ -377,6 +597,172 @@ export default function App() {
                 <Ionicons name="snow" size={19} color="#FFFFFF" />
                 <Text style={styles.saveButtonText}>保存到冰箱</Text>
               </Pressable>
+            </ScrollView>
+          </SafeAreaView>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={settingsModalVisible} animationType="slide" presentationStyle="pageSheet">
+        <KeyboardAvoidingView style={styles.modalRoot} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <SafeAreaView style={styles.modalSafe}>
+            <View style={styles.modalHeader}>
+              <Pressable style={styles.iconButton} onPress={closeSettings}>
+                <Ionicons name="close" size={22} color={colors.ink} />
+              </Pressable>
+              <Text style={styles.modalTitle}>基础配置</Text>
+              <Pressable style={styles.iconButton} onPress={() => setSettingsTab(settingsTab === "zones" ? "categories" : "zones")}>
+                <Ionicons name={settingsTab === "zones" ? "pricetags-outline" : "snow-outline"} size={21} color={colors.green} />
+              </Pressable>
+            </View>
+            <ScrollView contentContainerStyle={styles.form} showsVerticalScrollIndicator={false}>
+              <View style={styles.segmented}>
+                <Pressable
+                  style={[styles.segmentButton, settingsTab === "zones" && styles.segmentButtonActive]}
+                  onPress={() => setSettingsTab("zones")}
+                >
+                  <Text style={[styles.segmentText, settingsTab === "zones" && styles.segmentTextActive]}>冰箱分区</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.segmentButton, settingsTab === "categories" && styles.segmentButtonActive]}
+                  onPress={() => setSettingsTab("categories")}
+                >
+                  <Text style={[styles.segmentText, settingsTab === "categories" && styles.segmentTextActive]}>食材类别</Text>
+                </Pressable>
+              </View>
+
+              {settingsTab === "zones" ? (
+                <>
+                  <Field label="分区名称">
+                    <TextInput
+                      value={zoneDraft.name}
+                      onChangeText={(name) => setZoneDraft((current) => ({ ...current, name }))}
+                      placeholder="例如：门架、变温室、零度保鲜"
+                      placeholderTextColor={colors.muted}
+                      style={styles.input}
+                    />
+                  </Field>
+                  <Field label="温度范围">
+                    <TextInput
+                      value={zoneDraft.temperature}
+                      onChangeText={(temperature) => setZoneDraft((current) => ({ ...current, temperature }))}
+                      placeholder="例如：2-6°C / -18°C"
+                      placeholderTextColor={colors.muted}
+                      style={styles.input}
+                    />
+                  </Field>
+                  <Field label="适合存放">
+                    <TextInput
+                      value={zoneDraft.hint}
+                      onChangeText={(hint) => setZoneDraft((current) => ({ ...current, hint }))}
+                      placeholder="这个区域通常放什么"
+                      placeholderTextColor={colors.muted}
+                      style={[styles.input, styles.noteInput]}
+                      multiline
+                    />
+                  </Field>
+                  <Pressable style={styles.saveButton} onPress={saveZoneDraft}>
+                    <Ionicons name="save-outline" size={19} color="#FFFFFF" />
+                    <Text style={styles.saveButtonText}>保存分区</Text>
+                  </Pressable>
+
+                  <View style={styles.configList}>
+                    <View style={styles.sectionHeader}>
+                      <Text style={styles.sectionTitle}>当前分区</Text>
+                      <Text style={styles.sectionMeta}>{zones.length} 个</Text>
+                    </View>
+                    {zones.map((zone) => (
+                      <View key={zone.id} style={styles.configRow}>
+                        <Pressable style={styles.configInfo} onPress={() => editZone(zone)}>
+                          <Text style={styles.configName}>{zone.name}</Text>
+                          <Text style={styles.configMeta} numberOfLines={1}>
+                            {zone.temperature} · {zone.hint || "暂无说明"}
+                          </Text>
+                        </Pressable>
+                        <Pressable style={styles.smallIconButton} onPress={() => editZone(zone)}>
+                          <Ionicons name="create-outline" size={18} color={colors.blue} />
+                        </Pressable>
+                        <Pressable style={styles.smallIconButton} onPress={() => deleteZone(zone.id)}>
+                          <Ionicons name="trash-outline" size={18} color={colors.red} />
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                </>
+              ) : (
+                <>
+                  <Field label="类别名称">
+                    <TextInput
+                      value={categoryDraft.name}
+                      onChangeText={(name) => setCategoryDraft((current) => ({ ...current, name }))}
+                      placeholder="例如：药品、宠物食品、儿童辅食"
+                      placeholderTextColor={colors.muted}
+                      style={styles.input}
+                    />
+                  </Field>
+                  <Field label="默认保鲜天数">
+                    <View style={styles.stepper}>
+                      <Pressable
+                        style={styles.stepperButton}
+                        onPress={() =>
+                          setCategoryDraft((current) => ({
+                            ...current,
+                            defaultShelfLifeDays: Math.max(0, current.defaultShelfLifeDays - 1)
+                          }))
+                        }
+                      >
+                        <Ionicons name="remove" size={18} color={colors.ink} />
+                      </Pressable>
+                      <TextInput
+                        value={`${categoryDraft.defaultShelfLifeDays}`}
+                        onChangeText={(value) =>
+                          setCategoryDraft((current) => ({
+                            ...current,
+                            defaultShelfLifeDays: Number(value.replace(/\D/g, "")) || 0
+                          }))
+                        }
+                        keyboardType="number-pad"
+                        style={styles.stepperInput}
+                      />
+                      <Pressable
+                        style={styles.stepperButton}
+                        onPress={() =>
+                          setCategoryDraft((current) => ({
+                            ...current,
+                            defaultShelfLifeDays: current.defaultShelfLifeDays + 1
+                          }))
+                        }
+                      >
+                        <Ionicons name="add" size={18} color={colors.ink} />
+                      </Pressable>
+                    </View>
+                  </Field>
+                  <Pressable style={styles.saveButton} onPress={saveCategoryDraft}>
+                    <Ionicons name="save-outline" size={19} color="#FFFFFF" />
+                    <Text style={styles.saveButtonText}>保存类别</Text>
+                  </Pressable>
+
+                  <View style={styles.configList}>
+                    <View style={styles.sectionHeader}>
+                      <Text style={styles.sectionTitle}>当前类别</Text>
+                      <Text style={styles.sectionMeta}>{foodCategories.length} 个</Text>
+                    </View>
+                    {foodCategories.map((category) => (
+                      <View key={category.id} style={styles.configRow}>
+                        <Pressable style={styles.configInfo} onPress={() => editCategory(category)}>
+                          <Text style={styles.configName}>{category.name}</Text>
+                          <Text style={styles.configMeta}>{category.defaultShelfLifeDays} 天默认保鲜期</Text>
+                        </Pressable>
+                        <Pressable style={styles.smallIconButton} onPress={() => editCategory(category)}>
+                          <Ionicons name="create-outline" size={18} color={colors.blue} />
+                        </Pressable>
+                        <Pressable style={styles.smallIconButton} onPress={() => deleteCategory(category.id)}>
+                          <Ionicons name="trash-outline" size={18} color={colors.red} />
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                </>
+              )}
             </ScrollView>
           </SafeAreaView>
         </KeyboardAvoidingView>
@@ -433,9 +819,20 @@ function ZoneChip({
   );
 }
 
-function InventoryCard({ item, onDelete }: { item: InventoryItem; onDelete: () => void }) {
+function InventoryCard({
+  item,
+  zones,
+  categories,
+  onDelete
+}: {
+  item: InventoryItem;
+  zones: FridgeZone[];
+  categories: FoodCategoryConfig[];
+  onDelete: () => void;
+}) {
   const status = freshnessStatus(item.expiresAt);
-  const zone = fridgeZones.find((entry) => entry.id === item.zoneId);
+  const zone = zones.find((entry) => entry.id === item.zoneId);
+  const category = categories.find((entry) => entry.id === item.category);
   const statusStyle = {
     fresh: [colors.green, colors.greenSoft, "新鲜"],
     soon: [colors.yellow, colors.yellowSoft, "临期"],
@@ -459,7 +856,7 @@ function InventoryCard({ item, onDelete }: { item: InventoryItem; onDelete: () =
               {item.name}
             </Text>
             <Text style={styles.itemMeta} numberOfLines={1}>
-              {categoryLabels[item.category]} · {item.quantity}
+              {category?.name ?? "未分类"} · {item.quantity}
             </Text>
           </View>
           <View style={[styles.statusBadge, { backgroundColor: soft }]}>
@@ -519,6 +916,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 14
+  },
+  brandBlock: {
+    flex: 1,
+    minWidth: 0
+  },
+  brandConfigButton: {
+    alignSelf: "flex-start",
+    minHeight: 32,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: colors.surface
   },
   eyebrow: {
     color: colors.green,
@@ -837,6 +1248,33 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 8
   },
+  segmented: {
+    minHeight: 46,
+    borderRadius: 8,
+    padding: 4,
+    backgroundColor: colors.graySoft,
+    flexDirection: "row",
+    gap: 4
+  },
+  segmentButton: {
+    flex: 1,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  segmentButtonActive: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line
+  },
+  segmentText: {
+    color: colors.muted,
+    fontSize: 14,
+    fontWeight: "800"
+  },
+  segmentTextActive: {
+    color: colors.green
+  },
   optionPill: {
     borderRadius: 8,
     borderWidth: 1,
@@ -925,5 +1363,41 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 16,
     fontWeight: "800"
+  },
+  configList: {
+    gap: 10,
+    marginTop: 4
+  },
+  configRow: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8
+  },
+  configInfo: {
+    flex: 1,
+    minWidth: 0
+  },
+  configName: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  configMeta: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 4
+  },
+  smallIconButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.graySoft
   }
 });

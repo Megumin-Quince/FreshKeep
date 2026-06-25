@@ -1,21 +1,33 @@
-export type FridgeZoneId = "door" | "upper" | "middle" | "lower" | "freezer";
+export type FridgeZoneId = string;
 
 export type FreshnessStatus = "fresh" | "soon" | "expired";
 
-export type FoodCategory =
-  | "vegetable"
-  | "fruit"
-  | "meat"
-  | "dairy"
-  | "drink"
-  | "leftover"
-  | "other";
+export type FoodCategory = string;
 
 export interface FridgeZone {
   id: FridgeZoneId;
   name: string;
   temperature: string;
   hint: string;
+}
+
+export interface FridgeZoneDraft {
+  id?: FridgeZoneId;
+  name: string;
+  temperature: string;
+  hint: string;
+}
+
+export interface FoodCategoryConfig {
+  id: FoodCategory;
+  name: string;
+  defaultShelfLifeDays: number;
+}
+
+export interface FoodCategoryDraft {
+  id?: FoodCategory;
+  name: string;
+  defaultShelfLifeDays: number;
 }
 
 export interface InventoryItem {
