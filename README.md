@@ -12,6 +12,9 @@ FreshKeep is an offline-first React Native app for managing food in a fridge. It
 - Manual item entry with quantity, notes, category, fridge zone, and freshness period.
 - Local mock image recognition flow for quickly prefilling item data.
 - Fresh, expiring soon, and expired status calculation.
+- Interface language preferences with system language detection and manual English/Chinese switching.
+- Appearance preferences with system color scheme detection and manual light/dark switching.
+- iOS-oriented glass surfaces using Expo Blur where supported.
 - Future API integration points preserved through repository and gateway interfaces.
 
 ## Tech Stack
@@ -21,6 +24,8 @@ FreshKeep is an offline-first React Native app for managing food in a fridge. It
 - TypeScript
 - AsyncStorage
 - Expo Image Picker
+- Expo Localization
+- Expo Blur
 - Expo Vector Icons
 
 ## Requirements
